@@ -10,15 +10,12 @@ from webdriver_manager.core.os_manager import ChromeType
 import time
 import os
 import shutil
-from datetime import date, timedelta
+from datetime import date
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Robô XML NFS-e", page_icon="🤖")
-
-# Pasta temporária
 DOWNLOAD_DIR = "/tmp/xml_downloads"
 
-# --- FUNÇÕES UTILITÁRIAS ---
 def limpar_pasta():
     if os.path.exists(DOWNLOAD_DIR):
         shutil.rmtree(DOWNLOAD_DIR)
@@ -44,7 +41,6 @@ def get_driver():
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
-# --- LÓGICA DO ROBÔ ---
 def executar_robo(cnpj, senha, tipo_nota, data_inicio, data_fim):
     driver = None
     msg = st.empty()
@@ -55,14 +51,11 @@ def executar_robo(cnpj, senha, tipo_nota, data_inicio, data_fim):
         msg.info("🚀 Acessando portal...")
         driver = get_driver()
         driver.get("https://www.nfse.gov.br/EmissorNacional/Login")
-        
         wait = WebDriverWait(driver, 20)
         
-        # Preenche Login
         wait.until(EC.presence_of_element_located((By.ID, "Inscricao"))).send_keys(cnpj)
         driver.find_element(By.ID, "Senha").send_keys(senha)
         
-        # Clica em Entrar (Tenta XPATH primeiro, depois CSS)
         try:
             driver.find_element(By.XPATH, "//button[contains(text(), 'Entrar')]").click()
         except:
@@ -70,115 +63,100 @@ def executar_robo(cnpj, senha, tipo_nota, data_inicio, data_fim):
             
         time.sleep(5)
         
-        # Validação de Login
         if "Login" in driver.title or len(driver.find_elements(By.ID, "Inscricao")) > 0:
-            st.error("❌ Login falhou. Verifique se o CNPJ e Senha estão corretos.")
-            st.image(driver.get_screenshot_as_png(), caption="Tela de Erro Login", use_column_width=True)
+            st.error("❌ Login falhou. Verifique a senha.")
+            st.image(driver.get_screenshot_as_png(), caption="Erro Login", use_column_width=True)
             return
 
-        msg.success("✅ Login OK! Navegando para as notas...")
+        msg.success("✅ Login OK! Buscando menu de notas...")
 
-        # 2. NAVEGAÇÃO VIA MENU (Sem link direto para não travar)
-        termo_busca = "Recebidas" if tipo_nota == "Notas Recebidas" else "Emitidas"
+        # 2. NAVEGAÇÃO (AQUI ESTAVA O ERRO)
+        # Vamos buscar pelo LINK (href) que contém a palavra chave, é mais seguro que o título.
+        termo_url = "Emitidas" if tipo_nota == "Notas Emitidas" else "Recebidas"
         
         try:
-            # Procura qualquer link (a) que tenha o termo no título (Ex: 'NFS-e Emitidas')
-            # O XPATH abaixo ignora maiúsculas/minúsculas
-            xpath_menu = f"//a[contains(@title, '{termo_busca}')]"
-            botao_menu = wait.until(EC.element_to_be_clickable((By.XPATH, xpath_menu)))
+            # CSS Selector: procura qualquer <a> cujo href contenha a palavra (Ex: /Nfse/Emitidas)
+            seletor_link = f"a[href*='{termo_url}']"
+            
+            # Tenta achar o botão
+            botao_menu = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, seletor_link)))
+            
+            # Clica nele
             botao_menu.click()
-        except:
-            st.error(f"❌ Não encontrei o menu '{termo_busca}'. O site pode ter mudado.")
-            st.image(driver.get_screenshot_as_png(), caption="Erro ao achar Menu", use_column_width=True)
-            return
-
-        time.sleep(5) # Espera carregar a tela de notas
-
-        # 3. APLICAÇÃO DO FILTRO DE DATA
-        msg.info(f"📅 Aplicando filtro: {data_inicio} até {data_fim}...")
-        
-        try:
-            # Preenche Data Inicial
-            cmp_ini = driver.find_element(By.ID, "DataInicial")
-            cmp_ini.clear()
-            cmp_ini.send_keys(data_inicio) # Formato DD/MM/AAAA já vem do input do Streamlit formatado? Vamos garantir.
-            
-            # Preenche Data Final
-            cmp_fim = driver.find_element(By.ID, "DataFinal")
-            cmp_fim.clear()
-            cmp_fim.send_keys(data_fim)
-            
-            # Clica em Filtrar
-            driver.find_element(By.ID, "btnFiltrar").click() # ID chutado (comum), se der erro ajustamos.
-            # Alternativa genérica para botão filtrar:
-            # driver.find_element(By.XPATH, "//button[contains(text(), 'Filtrar')]").click()
-            
-            time.sleep(5) # Espera a tabela atualizar
+            msg.info(f"Clicado no menu {termo_url} com sucesso!")
             
         except Exception as e:
-            st.warning(f"⚠️ Não consegui filtrar as datas (Erros de ID). Baixando o que estiver na tela. Erro: {e}")
+            st.warning(f"⚠️ Clique normal falhou. Tentando modo forçado... Erro: {e}")
+            # Tenta forçar o clique via JavaScript se o Selenium não conseguir
+            try:
+                driver.execute_script(f"document.querySelector(\"a[href*='{termo_url}']\").click()")
+            except:
+                st.error("❌ Realmente não consegui clicar no menu. O site mudou a estrutura dos links.")
+                st.image(driver.get_screenshot_as_png(), caption="Falha no Menu", use_column_width=True)
+                return
 
-        st.image(driver.get_screenshot_as_png(), caption="Tabela Filtrada", use_column_width=True)
+        time.sleep(5) 
 
-        # 4. EXTRAÇÃO (LOOP)
-        msg.info("🔄 Processando lista de notas...")
-        
-        # Pega as linhas da tabela (body)
+        # 3. FILTRO DE DATA
+        msg.info(f"📅 Filtrando de {data_inicio} até {data_fim}...")
+        try:
+            driver.find_element(By.ID, "DataInicial").clear()
+            driver.find_element(By.ID, "DataInicial").send_keys(data_inicio)
+            
+            driver.find_element(By.ID, "DataFinal").clear()
+            driver.find_element(By.ID, "DataFinal").send_keys(data_fim)
+            
+            # Clica no botão Filtrar (ícone de filtro ou botão com texto Filtrar)
+            # Geralmente é um button com type='submit' dentro do form de filtro
+            driver.find_element(By.CSS_SELECTOR, "button[type='submit'], #btnFiltrar").click()
+            time.sleep(4)
+        except:
+            st.warning("⚠️ Erro ao preencher datas. Baixando o que estiver visível.")
+
+        st.image(driver.get_screenshot_as_png(), caption="Tabela de Notas", use_column_width=True)
+
+        # 4. EXTRAÇÃO
+        msg.info("🔄 Baixando XMLs...")
         linhas = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
         
-        # Validação: Se a linha tiver texto "Nenhum registro", aborta
         if len(linhas) > 0 and "Nenhum registro" in linhas[0].text:
-             st.warning("⚠️ O filtro retornou 0 notas.")
+             st.warning("⚠️ Nenhuma nota encontrada neste período.")
              return
 
         qtd = len(linhas)
-        st.write(f"**Encontrei {qtd} notas na tela.**")
-        
+        st.write(f"Encontradas: {qtd} notas.")
         bar = st.progress(0)
-        sucessos = 0
         
         for i, linha in enumerate(linhas):
             try:
-                # Acha o botão de menu (3 pontinhos)
-                # O seletor busca um dropdown dentro da última célula
-                botao_tres_pontos = linha.find_element(By.CSS_SELECTOR, ".dropdown-toggle")
+                # 1. Clica nos 3 pontinhos (Dropdown)
+                botao_menu = linha.find_element(By.CSS_SELECTOR, ".dropdown-toggle")
+                driver.execute_script("arguments[0].click();", botao_menu)
+                time.sleep(0.5)
                 
-                # FORÇA BRUTA (JavaScript): Clica mesmo se tiver algo na frente
-                driver.execute_script("arguments[0].click();", botao_tres_pontos)
-                time.sleep(1)
-                
-                # Clica em "Download XML"
+                # 2. Clica no Download XML
+                # Busca o link que tem o texto 'Download XML' visível agora
                 link_xml = driver.find_element(By.XPATH, "//a[contains(text(), 'Download XML')]")
                 driver.execute_script("arguments[0].click();", link_xml)
                 
-                sucessos += 1
-                time.sleep(1.5) # Dá tempo para o download iniciar
-                
-                # Clica fora para fechar o menu (opcional)
-                webdriver.ActionChains(driver).move_by_offset(0, 0).click().perform()
-                
+                time.sleep(1.5)
+                webdriver.ActionChains(driver).move_by_offset(0, 0).click().perform() # Fecha menu
             except Exception as e:
                 print(f"Erro linha {i}: {e}")
-            
             bar.progress((i + 1) / qtd)
 
-        time.sleep(5) # Espera downloads terminarem
+        time.sleep(3)
         
-        # 5. EMPACOTAR E ENTREGAR
+        # 5. DOWNLOAD FINAL
         arquivos = os.listdir(DOWNLOAD_DIR)
         if len(arquivos) > 0:
             shutil.make_archive("/tmp/notas_fiscais", 'zip', DOWNLOAD_DIR)
             with open("/tmp/notas_fiscais.zip", "rb") as f:
-                st.success(f"✅ Sucesso! {len(arquivos)} arquivos baixados.")
-                st.download_button(
-                    label="📥 BAIXAR ZIP COMPLETO",
-                    data=f,
-                    file_name="notas_xml.zip",
-                    mime="application/zip"
-                )
+                st.success(f"✅ Sucesso! {len(arquivos)} notas baixadas.")
+                st.download_button("📥 BAIXAR ZIP", f, "notas.zip", "application/zip")
                 st.balloons()
         else:
-            st.error("❌ Nenhum arquivo XML apareceu na pasta. O download falhou.")
+            st.error("❌ Nenhum arquivo baixado.")
 
     except Exception as e:
         st.error(f"Erro Crítico: {e}")
@@ -186,9 +164,8 @@ def executar_robo(cnpj, senha, tipo_nota, data_inicio, data_fim):
         if driver:
             driver.quit()
 
-# --- INTERFACE LATERAL ---
+# --- FORMULÁRIO ---
 st.title("🤖 Robô NFS-e Nacional")
-
 with st.form("form_dados"):
     col1, col2 = st.columns(2)
     with col1:
@@ -197,16 +174,9 @@ with st.form("form_dados"):
     with col2:
         senha_input = st.text_input("Senha", type="password")
         data_fim = st.date_input("Data Final", value=date.today())
-        
-    tipo = st.selectbox("Tipo de Nota", ["Notas Recebidas", "Notas Emitidas"])
-    
-    submitted = st.form_submit_button("🚀 Iniciar Robô")
-
-if submitted:
-    if not cnpj_input or not senha_input:
-        st.warning("Preencha CNPJ e Senha.")
-    else:
-        # Formata datas para String DD/MM/AAAA
-        d_ini_str = data_ini.strftime("%d/%m/%Y")
-        d_fim_str = data_fim.strftime("%d/%m/%Y")
-        executar_robo(cnpj_input, senha_input, tipo, d_ini_str, d_fim_str)
+    tipo = st.selectbox("Tipo de Nota", ["Notas Emitidas", "Notas Recebidas"]) # Mudei a ordem para testar Emitidas primeiro
+    if st.form_submit_button("🚀 Iniciar Robô"):
+        if cnpj_input and senha_input:
+            executar_robo(cnpj_input, senha_input, tipo, data_ini.strftime("%d/%m/%Y"), data_fim.strftime("%d/%m/%Y"))
+        else:
+            st.warning("Preencha os dados.")
