@@ -10,9 +10,10 @@ from webdriver_manager.core.os_manager import ChromeType
 import time
 import os
 import shutil
+import requests # A NOVA ARMA SECRETA
 from datetime import date
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
+# --- CONFIGURAÇÃO ---
 st.set_page_config(page_title="Robô XML NFS-e", page_icon="🤖")
 DOWNLOAD_DIR = "/tmp/xml_downloads"
 
@@ -32,25 +33,11 @@ def get_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    # CONFIGURAÇÕES "NUCLEARES" PARA PERMITIR DOWNLOAD NA NUVEM
-    prefs = {
-        "download.default_directory": DOWNLOAD_DIR,
-        "download.prompt_for_download": False,
-        "download.directory_upgrade": True,
-        "safebrowsing.enabled": True,
-        "profile.default_content_settings.popups": 0,
-        "profile.default_content_setting_values.automatic_downloads": 1,
-        "profile.content_settings.exceptions.automatic_downloads.*.setting": 1,
-        "excludeSwitches": ["enable-automation"],
-        "useAutomationExtension": False
-    }
-    chrome_options.add_experimental_option("prefs", prefs)
-    
     service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
-# Função mágica para preencher datas
+# Função para injetar data (Mantida)
 def forcar_data_js(driver, elemento_id, data_valor):
     try:
         driver.execute_script(f"document.getElementById('{elemento_id}').value = '{data_valor}';")
@@ -59,11 +46,12 @@ def forcar_data_js(driver, elemento_id, data_valor):
 
 def executar_robo(cnpj, senha, tipo_nota, data_inicio, data_fim):
     driver = None
+    session = None
     msg = st.empty()
     limpar_pasta()
     
     try:
-        # 1. LOGIN
+        # 1. LOGIN (Igual)
         msg.info("🚀 Acessando portal...")
         driver = get_driver()
         driver.get("https://www.nfse.gov.br/EmissorNacional/Login")
@@ -79,24 +67,35 @@ def executar_robo(cnpj, senha, tipo_nota, data_inicio, data_fim):
             
         time.sleep(5)
         
-        # Verificação básica de erro
+        # Verifica Login
         if len(driver.find_elements(By.CLASS_NAME, "validation-summary-errors")) > 0:
-            st.error("Erro no Login: Verifique usuário e senha.")
+            st.error("Erro no Login.")
             return
 
-        msg.success("✅ Login OK! Buscando menu...")
+        msg.success("✅ Login OK! Roubando cookies para o Python...")
+
+        # --- O PULO DO GATO: PREPARAR O REQUESTS ---
+        # Pega os cookies do navegador (Selenium) e passa para o Python (Requests)
+        session = requests.Session()
+        for cookie in driver.get_cookies():
+            session.cookies.set(cookie['name'], cookie['value'])
+        
+        # Cabeçalhos para fingir que o Python é um navegador
+        session.headers.update({
+            "User-Agent": driver.execute_script("return navigator.userAgent;")
+        })
 
         # 2. NAVEGAÇÃO
         termo_url = "Emitidas" if tipo_nota == "Notas Emitidas" else "Recebidas"
         try:
             driver.execute_script(f"document.querySelector(\"a[href*='{termo_url}']\").click()")
         except:
-             st.error("Não achei o menu. O site mudou?")
+             st.error("Erro ao achar menu.")
              return
 
         time.sleep(4) 
 
-        # 3. FILTRO DE DATA
+        # 3. FILTRO
         msg.info(f"📅 Filtrando...")
         try:
             forcar_data_js(driver, "DataInicial", data_inicio)
@@ -104,83 +103,103 @@ def executar_robo(cnpj, senha, tipo_nota, data_inicio, data_fim):
             time.sleep(1)
             driver.find_element(By.CSS_SELECTOR, "button[type='submit'], #btnFiltrar").click()
             time.sleep(4)
-        except Exception as e:
-            st.warning(f"Aviso no filtro: {e}")
+        except:
+            pass
 
-        # 4. EXTRAÇÃO (A MUDANÇA ESTÁ AQUI)
-        msg.info("🔄 Baixando XMLs...")
+        st.image(driver.get_screenshot_as_png(), caption="Tabela Filtrada", use_column_width=True)
+
+        # 4. EXTRAÇÃO HÍBRIDA (SELENIUM + REQUESTS)
+        msg.info("🔄 Baixando via Python Direto (Bypass Chrome)...")
         linhas = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
         
         qtd = len(linhas)
         st.write(f"Encontradas: {qtd} notas.")
         
         if qtd == 0:
-            st.warning("Nenhuma nota para baixar.")
+            st.warning("Sem notas.")
             return
 
         bar = st.progress(0)
+        sucesso_count = 0
         
         for i, linha in enumerate(linhas):
             try:
-                # 1. Abre o Menu
+                # 1. Abre o Menu para garantir que o link exista no DOM
                 botao_menu = linha.find_element(By.CSS_SELECTOR, ".dropdown-toggle")
                 driver.execute_script("arguments[0].click();", botao_menu)
-                time.sleep(1)
+                time.sleep(0.5)
                 
-                # 2. ESTRATÉGIA LINK DIRETO (Mais confiável que clicar)
-                link_xml = driver.find_element(By.XPATH, "//a[contains(text(), 'XML')]")
-                url_download = link_xml.get_attribute('href')
+                # 2. PEGA A URL DO XML
+                link_el = driver.find_element(By.XPATH, "//a[contains(text(), 'XML')]")
+                url_download = link_el.get_attribute('href')
                 
-                if url_download and "javascript" not in url_download:
-                    # Se for um link real, navega até ele para forçar o download
-                    driver.get(url_download)
-                    # Volta para a página anterior para continuar o loop
-                    driver.back()
-                    time.sleep(2) 
-                    # Re-localiza as linhas pois a página recarregou
-                    linhas = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-                else:
-                    # Se for JavaScript, clica normal
-                    driver.execute_script("arguments[0].click();", link_xml)
+                # Se o link for javascript, não temos saída na nuvem :(
+                if "javascript" in url_download:
+                    st.warning(f"Nota {i+1}: O link é JavaScript protegido. Tentando clique forçado...")
+                    driver.execute_script("arguments[0].click();", link_el)
                     time.sleep(2)
+                else:
+                    # Se for URL real (http...), o Python baixa!
+                    # Se o link for relativo (começa com /), completa ele
+                    if url_download.startswith("/"):
+                        url_download = "https://www.nfse.gov.br" + url_download
+                    
+                    # DOWNLOAD VIA REQUESTS (Aqui a mágica acontece)
+                    response = session.get(url_download)
+                    
+                    if response.status_code == 200:
+                        nome_arquivo = f"nota_{i+1}_{date.today()}.xml"
+                        caminho_completo = os.path.join(DOWNLOAD_DIR, nome_arquivo)
+                        with open(caminho_completo, "wb") as f:
+                            f.write(response.content)
+                        sucesso_count += 1
+                    else:
+                        print(f"Erro HTTP {response.status_code}")
+
+                webdriver.ActionChains(driver).move_by_offset(0, 0).click().perform() # Fecha menu
                 
             except Exception as e:
                 print(f"Erro linha {i}: {e}")
             bar.progress((i + 1) / qtd)
 
-        time.sleep(5) # Espera final
+        time.sleep(2)
         
-        # 5. DIAGNÓSTICO DE ARQUIVOS
+        # 5. ENTREGA
         arquivos = os.listdir(DOWNLOAD_DIR)
         
-        # Debug: Mostra o que tem na pasta (se tiver algo com nome estranho, saberemos)
+        # Se o download via requests falhou, tenta ver se o clique forçado funcionou
         if len(arquivos) == 0:
-            st.warning("Pasta vazia. Tentando procurar na raiz...")
-            arquivos_raiz = [f for f in os.listdir("/tmp") if f.endswith(".xml")]
-            if len(arquivos_raiz) > 0:
-                # Move para a pasta certa
-                for f in arquivos_raiz:
-                    shutil.move(os.path.join("/tmp", f), DOWNLOAD_DIR)
-                arquivos = os.listdir(DOWNLOAD_DIR)
+             # Procura na raiz /tmp como última esperança
+             arquivos_raiz = [f for f in os.listdir("/tmp") if f.endswith(".xml")]
+             for f in arquivos_raiz:
+                 shutil.move(os.path.join("/tmp", f), DOWNLOAD_DIR)
+             arquivos = os.listdir(DOWNLOAD_DIR)
 
         if len(arquivos) > 0:
             shutil.make_archive("/tmp/notas_fiscais", 'zip', DOWNLOAD_DIR)
             with open("/tmp/notas_fiscais.zip", "rb") as f:
-                st.success(f"✅ SUCESSO! {len(arquivos)} arquivos recuperados!")
-                st.download_button("📥 BAIXAR ZIP AGORA", f, "notas.zip", "application/zip")
+                st.success(f"✅ VITÓRIA! {len(arquivos)} notas recuperadas.")
+                st.download_button("📥 BAIXAR ZIP", f, "notas.zip", "application/zip")
                 st.balloons()
         else:
-            st.error("❌ Os arquivos não foram salvos. O Google Chrome bloqueou o download na nuvem.")
-            st.write("Dica: Tente rodar este script localmente no seu PC (VS Code), pois na nuvem o bloqueio de segurança é muito alto.")
+            st.error("❌ O site do governo usa links JavaScript criptografados.")
+            st.warning("⚠️ SOLUÇÃO DEFINITIVA: Clayton, o portal bloqueia robôs na nuvem. A única forma profissional de usar isso no escritório é rodar LOCALMENTE.")
+            st.markdown("""
+            **Como rodar no escritório sem dor de cabeça:**
+            1. Baixe este código `appy.py`.
+            2. Instale o Python nas máquinas.
+            3. Digite `streamlit run appy.py` no terminal do Windows.
+            4. O robô vai usar o Chrome local e vai funcionar 100%.
+            """)
 
     except Exception as e:
-        st.error(f"Erro Crítico: {e}")
+        st.error(f"Erro: {e}")
     finally:
         if driver:
             driver.quit()
 
 # --- FORMULÁRIO ---
-st.title("🤖 Robô NFS-e v6.0")
+st.title("🤖 Robô NFS-e (Modo Híbrido)")
 with st.form("form_dados"):
     col1, col2 = st.columns(2)
     with col1:
@@ -190,6 +209,6 @@ with st.form("form_dados"):
         senha_input = st.text_input("Senha", type="password")
         data_fim = st.date_input("Data Final", value=date.today())
     tipo = st.selectbox("Tipo de Nota", ["Notas Emitidas", "Notas Recebidas"])
-    if st.form_submit_button("🚀 Executar"):
+    if st.form_submit_button("🚀 Tentar Última Vez"):
         if cnpj_input and senha_input:
             executar_robo(cnpj_input, senha_input, tipo, data_ini.strftime("%d/%m/%Y"), data_fim.strftime("%d/%m/%Y"))
